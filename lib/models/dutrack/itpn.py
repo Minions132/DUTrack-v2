@@ -990,7 +990,7 @@ class Fast_iTPN(BaseBackbone):
         return x
 
     def _l_feat(self,l):
-        descript_id = self.tokenizer(l, add_special_tokens=True, truncation=True,pad_to_max_length=True, max_length=16)['input_ids']
+        descript_id = self.tokenizer(l, add_special_tokens=True, truncation=True, padding="max_length", max_length=16)['input_ids']
         descript_id_tensor = torch.tensor(descript_id)
         l = self.descript_embedding(descript_id_tensor.to('cuda'))
         l += self.description_patch_pos_embed(l)

@@ -25,4 +25,4 @@ if __name__ == "__main__":
 
     dataset = get_dataset('lasot')
 
-    print_results(trackers, dataset, 'LaSOT', merge_results=True, plot_types=('success', 'prec', 'norm_prec'))
+    print_results(trackers, dataset, 'LaSOT', merge_results=True, plot_types=('success', 'prec', 'norm_prec', 'pr'))

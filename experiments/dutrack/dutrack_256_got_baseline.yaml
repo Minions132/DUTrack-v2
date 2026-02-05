@@ -1,3 +1,5 @@
+# DUTrack GOT-10k Baseline配置
+# FLOW_WINDOW_SIZE=1 (单帧更新，原始论文方法)
 DATA:
   MAX_SAMPLE_INTERVAL: 200
   MEAN:
@@ -22,20 +24,16 @@ DATA:
     SIZE: 128
   TRAIN:
     DATASETS_NAME:
-      - LASOT
-      - GOT10K_vottrain
-      - TNL2k
+      - GOT10K_train_full
     DATASETS_RATIO:
-      - 1
-      - 1
       - 1
     SAMPLE_PER_EPOCH: 30000
   VAL:
     DATASETS_NAME:
-      - GOT10K_votval
+      - GOT10K_official_val
     DATASETS_RATIO:
       - 1
-    SAMPLE_PER_EPOCH: 10000
+    SAMPLE_PER_EPOCH: 6000
 MODEL:
   BACKBONE:
     ADD_CLS_TOKEN: true
@@ -58,7 +56,7 @@ MODEL:
   HEAD:
     NUM_CHANNELS: 256
     TYPE: CENTER
-  PRETRAIN_FILE: DUTrack_Pretrained_256_full.pth.tar
+  PRETRAIN_FILE: DUTrack_Pretrained_256_got.pth.tar
   RETURN_INTER: false
 TEST:
   EPOCH: 1
@@ -66,20 +64,25 @@ TEST:
   SEARCH_FACTOR: 4.0
   SEARCH_SIZE: 256
   TEMPLATE_FACTOR: 2.0
-  TEMPLATE_NUMBER: 3
+  TEMPLATE_NUMBER: 4
   TEMPLATE_SIZE: 128
+  # Baseline: 单帧更新 (原始论文方法)
+  FLOW_WINDOW_SIZE: 1
+  FLOW_UPDATE_INTERVAL: 10
+  SAVE_SCORES: true
+  PR_IOU_THRESHOLD: 0.5
 TRAIN:
   AMP: false
   BACKBONE_MULTIPLIER: 0.1
   BATCH_SIZE: 8
   BBOX_TASK: true
   DROP_PATH_RATE: 0.1
-  EPOCH: 45
+  EPOCH: 30
   GIOU_WEIGHT: 2.0
   GRAD_CLIP_NORM: 0.1
   L1_WEIGHT: 5.0
   LR: 0.0001
-  LR_DROP_EPOCH: 40
+  LR_DROP_EPOCH: 20
   NUM_WORKER: 10
   OPTIMIZER: ADAMW
   PRINT_INTERVAL: 50

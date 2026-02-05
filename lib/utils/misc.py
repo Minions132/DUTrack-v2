@@ -466,3 +466,57 @@ def interpolate(input, size=None, scale_factor=None, mode="nearest", align_corne
         return _new_empty_tensor(input, output_shape)
     else:
         return torchvision.ops.misc.interpolate(input, size, scale_factor, mode, align_corners)
+
+def compute_visual_consensus(patch_list: List[torch.Tensor], score_list: List[float] = None) -> torch.Tensor:
+    """
+    Computes a consensus (weighted average) from a list of visual patches.
+    Newer frames are given slightly more weight.
+    If score_list is provided, weights are adjusted by tracking confidence.
+    
+    Args:
+        patch_list (List[torch.Tensor]): List of image patch tensors (C, H, W) or (1, C, H, W).
+                                         They should be of the same size.
+        score_list (List[float]): List of tracking confidence scores corresponding to each patch.
+    Returns:
+        torch.Tensor: The consensus patch tensor.
+    """
+    if not patch_list:
+        return None
+    
+    # Ensure all patches are 4D (1, C, H, W) for consistent processing
+    patches = []
+    for p in patch_list:
+        if p.dim() == 3:
+            patches.append(p.unsqueeze(0))
+        else:
+            patches.append(p)
+            
+    n = len(patches)
+    device = patches[0].device
+    
+    if score_list is not None and len(score_list) == n:
+        scores = torch.tensor(score_list, dtype=torch.float32, device=device)
+        # Normalize scores to [0, 1] range approximately if they aren't already
+        # Assuming scores are raw output logits or probabilities. 
+        # A simple softmax over the combination works well.
+        
+        # Time weights: linearly increasing [1/n, 2/n, ..., 1.0]
+        time_weights = torch.arange(1, n + 1, dtype=torch.float32, device=device) / n
+        
+        # Combine weights: 
+        # alpha * time_factor + beta * score_factor
+        # We give Score a higher weight to suppress low-quality frames significantly.
+        # Tunable hyperparameters: alpha=0.3, beta=0.7
+        combined_logits = 0.3 * time_weights + 0.7 * scores
+        
+        weights = torch.softmax(combined_logits, dim=0)
+    else:
+        # Fallback to simple temporal weighting
+        weights = torch.arange(1, n + 1, dtype=torch.float32, device=device)
+        weights = weights / weights.sum()
+    
+    consensus_patch = torch.zeros_like(patches[0])
+    for w, p in zip(weights, patches):
+        consensus_patch += w * p
+        
+    return consensus_patch

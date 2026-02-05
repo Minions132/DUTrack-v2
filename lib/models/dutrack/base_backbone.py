@@ -83,7 +83,7 @@ class BaseBackbone(nn.Module):
 
     def forward_features(self, z, x, l, temporal_query=None):
         B = x.shape[0]
-        descript_id = self.tokenizer(l, add_special_tokens=False, truncation=True, pad_to_max_length=True,max_length=16)['input_ids']
+        descript_id = self.tokenizer(l, add_special_tokens=False, truncation=True, padding="max_length",max_length=16)['input_ids']
         descript_id_tensor = torch.tensor(descript_id)
         if self.add_cls_token:
             temporal_init = self.temporal_token.expand(B,1,-1)

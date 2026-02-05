@@ -1,3 +1,6 @@
+# DUTrack GOT-10k Enhanced V2 配置
+# 显著性能提升的改进版本 V2
+# 核心改进：时序模板融合 + 尺度感知跟踪 + 多假设选择 + 预测平滑
 DATA:
   MAX_SAMPLE_INTERVAL: 200
   MEAN:
@@ -22,20 +25,16 @@ DATA:
     SIZE: 128
   TRAIN:
     DATASETS_NAME:
-      - LASOT
-      - GOT10K_vottrain
-      - TNL2k
+      - GOT10K_train_full
     DATASETS_RATIO:
-      - 1
-      - 1
       - 1
     SAMPLE_PER_EPOCH: 30000
   VAL:
     DATASETS_NAME:
-      - GOT10K_votval
+      - GOT10K_official_val
     DATASETS_RATIO:
       - 1
-    SAMPLE_PER_EPOCH: 10000
+    SAMPLE_PER_EPOCH: 6000
 MODEL:
   BACKBONE:
     ADD_CLS_TOKEN: true
@@ -58,7 +57,7 @@ MODEL:
   HEAD:
     NUM_CHANNELS: 256
     TYPE: CENTER
-  PRETRAIN_FILE: DUTrack_Pretrained_256_full.pth.tar
+  PRETRAIN_FILE: DUTrack_Pretrained_256_got.pth.tar
   RETURN_INTER: false
 TEST:
   EPOCH: 1
@@ -66,20 +65,50 @@ TEST:
   SEARCH_FACTOR: 4.0
   SEARCH_SIZE: 256
   TEMPLATE_FACTOR: 2.0
-  TEMPLATE_NUMBER: 3
+  TEMPLATE_NUMBER: 4
   TEMPLATE_SIZE: 128
+
+  # ============ Enhanced V2 Parameters ============
+  # 置信度阈值
+  HIGH_CONF_THRESHOLD: 0.65 # 高置信度阈值，用于模板更新
+  LOW_CONF_THRESHOLD: 0.35 # 低置信度阈值，触发扩大搜索
+  FAILURE_THRESHOLD: 0.2 # 失败检测阈值
+
+  # 自适应搜索区域
+  MIN_SEARCH_FACTOR: 4.0 # 最小搜索因子（高置信度时）
+  MAX_SEARCH_FACTOR: 5.5 # 最大搜索因子（失败恢复时）
+
+  # 运动和尺度估计
+  MOTION_WINDOW: 5 # 运动估计窗口大小
+
+  # 平滑参数 (减少抖动，提升AUC)
+  SCALE_SMOOTH_FACTOR: 0.4 # 尺度平滑系数
+  POSITION_SMOOTH_FACTOR: 0.2 # 位置平滑系数
+
+  # 模板更新策略
+  TEMPLATE_UPDATE_INTERVAL: 5 # 模板更新最小间隔
+  MAX_TEMPLATES: 15 # 最大模板数量
+
+  # 多假设跟踪
+  USE_MULTI_HYPOTHESIS: true # 启用多假设跟踪
+  NUM_HYPOTHESES: 3 # 候选假设数量
+
+  # 其他
+  SAVE_SCORES: true
+  PR_IOU_THRESHOLD: 0.5
+
 TRAIN:
   AMP: false
   BACKBONE_MULTIPLIER: 0.1
   BATCH_SIZE: 8
   BBOX_TASK: true
   DROP_PATH_RATE: 0.1
-  EPOCH: 45
+  EPOCH: 30
   GIOU_WEIGHT: 2.0
   GRAD_CLIP_NORM: 0.1
   L1_WEIGHT: 5.0
   LR: 0.0001
-  LR_DROP_EPOCH: 40
+  LR_DROP_EPOCH: 20
   NUM_WORKER: 10
   OPTIMIZER: ADAMW
   PRINT_INTERVAL: 50

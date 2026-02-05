@@ -32,6 +32,6 @@ def parameters(yaml_name: str, run_id=None):
     params.save_all_boxes = False
 
     # whether to save per-frame confidence scores for PR curve
-    params.save_scores = cfg.TEST.SAVE_SCORES
+    params.save_scores = getattr(cfg.TEST, 'SAVE_SCORES', False)
 
     return params

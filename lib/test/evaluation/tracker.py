@@ -125,6 +125,7 @@ class Tracker:
                   'segmentation': []}
         if tracker.params.save_all_boxes:
             output['all_boxes'] = []
+        if tracker.params.save_all_boxes or tracker.params.save_scores:
             output['all_scores'] = []
 
         def _store_outputs(tracker_out: dict, defaults=None):
@@ -148,7 +149,8 @@ class Tracker:
                         'time': time.time() - start_time}
         if tracker.params.save_all_boxes:
             init_default['all_boxes'] = out['all_boxes']
-            init_default['all_scores'] = out['all_scores']
+        if tracker.params.save_all_boxes or tracker.params.save_scores:
+            init_default['all_scores'] = out.get('all_scores', 1.0)
 
         _store_outputs(out, init_default)
 

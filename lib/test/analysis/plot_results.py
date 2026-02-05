@@ -212,6 +212,13 @@ def get_prec_curve(ave_success_rate_plot_center, valid_sequence):
     return prec_curve, prec_score
 
 
+def get_pr_curve(pr_curve, valid_sequence):
+    pr_curve = pr_curve[valid_sequence, :, :]
+    pr_curve_mean = pr_curve.mean(0) * 100.0
+    pr_ap = torch.trapz(pr_curve_mean / 100.0, torch.linspace(0, 1, pr_curve_mean.shape[-1])).mean(0) * 100.0
+    return pr_curve_mean, pr_ap
+
+
 def plot_results(trackers, dataset, report_name, merge_results=False,
                  plot_types=('success'), force_evaluation=False, **kwargs):
     """
@@ -241,6 +248,7 @@ def plot_results(trackers, dataset, report_name, merge_results=False,
     tracker_names = eval_data['trackers']
 
     valid_sequence = torch.tensor(eval_data['valid_sequence'], dtype=torch.bool)
+    valid_sequence_pr = torch.tensor(eval_data.get('valid_sequence_pr', eval_data['valid_sequence']), dtype=torch.bool)
 
     print('\nPlotting results over {} / {} sequences'.format(valid_sequence.long().sum().item(), valid_sequence.shape[0]))
 
@@ -285,6 +293,27 @@ def plot_results(trackers, dataset, report_name, merge_results=False,
                                     'xlim': (0, 0.5), 'ylim': (0, 85), 'title': 'Normalized Precision'}
         plot_draw_save(prec_curve, threshold_set_center_norm, prec_score, tracker_names, plot_draw_styles, result_plot_path,
                        norm_precision_plot_opts)
+
+    # ********************************  PR Plot **************************************
+    if 'pr' in plot_types:
+        if 'pr_curve' not in eval_data:
+            print('PR curve data not found. Please enable score saving and re-run evaluation.')
+        else:
+            if valid_sequence_pr.long().sum().item() == 0:
+                print('PR curve skipped: no valid sequences with score files found.')
+            else:
+                pr_curve = torch.tensor(eval_data['pr_curve'])
+                pr_ap = torch.tensor(eval_data['pr_ap'])
+                threshold_set_recall = torch.tensor(eval_data['threshold_set_recall'])
+
+                pr_curve_mean = pr_curve[valid_sequence_pr, :, :].mean(0) * 100.0
+                pr_ap_mean = pr_ap[valid_sequence_pr, :].mean(0) * 100.0
+
+                pr_plot_opts = {'plot_type': 'pr', 'legend_loc': 'lower left',
+                                'xlabel': 'Recall', 'ylabel': 'Precision [%]',
+                                'xlim': (0, 1.0), 'ylim': (0, 100), 'title': 'Precision-Recall'}
+                plot_draw_save(pr_curve_mean, threshold_set_recall, pr_ap_mean, tracker_names, plot_draw_styles,
+                               result_plot_path, pr_plot_opts)
 
     plt.show()
 
@@ -366,6 +395,15 @@ def print_results(trackers, dataset, report_name, merge_results=False,
         # Index out valid sequences
         norm_prec_curve, norm_prec_score = get_prec_curve(ave_success_rate_plot_center_norm, valid_sequence)
         scores['Norm Precision'] = norm_prec_score
+
+    # ********************************  PR Plot *********************************
+    if 'pr' in plot_types and 'pr_curve' in eval_data:
+        pr_curve = torch.tensor(eval_data['pr_curve'])
+        pr_ap = torch.tensor(eval_data['pr_ap'])
+        valid_sequence_pr = torch.tensor(eval_data.get('valid_sequence_pr', eval_data['valid_sequence']), dtype=torch.bool)
+        if valid_sequence_pr.long().sum().item() > 0:
+            pr_ap_mean = pr_ap[valid_sequence_pr, :].mean(0) * 100.0
+            scores['AP'] = pr_ap_mean
 
     # Print
     tracker_disp_names = [get_tracker_display_name(trk) for trk in tracker_names]

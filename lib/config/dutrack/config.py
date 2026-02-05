@@ -108,6 +108,28 @@ cfg.TEST.MEMORY_THRESHOLD = 1000
 cfg.TEST.SEARCH_FACTOR = 5.0
 cfg.TEST.SEARCH_SIZE = 320
 cfg.TEST.EPOCH = 500
+cfg.TEST.FLOW_WINDOW_SIZE = 5
+cfg.TEST.FLOW_UPDATE_INTERVAL = 10
+cfg.TEST.SAVE_SCORES = True
+cfg.TEST.PR_IOU_THRESHOLD = 0.5
+# AQADU: Adaptive Quality-Aware Dynamic Update parameters
+cfg.TEST.ITM_THRESHOLD = 0.005  # ITM threshold for consensus update quality filtering
+cfg.TEST.MIN_UPDATE_INTERVAL = 5  # Minimum frames between consensus updates
+cfg.TEST.MAX_UPDATE_INTERVAL = 15  # Maximum frames between consensus updates
+# Enhanced: Confidence-Aware Template Selection and Adaptive Search
+cfg.TEST.HIGH_CONF_THRESHOLD = 0.7  # High confidence threshold for template update
+cfg.TEST.LOW_CONF_THRESHOLD = 0.3   # Low confidence threshold for search expansion
+cfg.TEST.FAILURE_THRESHOLD = 0.15   # Failure detection threshold
+cfg.TEST.MIN_SEARCH_FACTOR = 3.0    # Minimum search factor (high confidence)
+cfg.TEST.MAX_SEARCH_FACTOR = 6.0    # Maximum search factor (failure recovery)
+cfg.TEST.MOTION_WINDOW = 5          # Motion estimation window size
+cfg.TEST.MAX_TEMPLATES = 10         # Maximum template pool size
+# Enhanced V2: Smoothing and Multi-Hypothesis parameters
+cfg.TEST.SCALE_SMOOTH_FACTOR = 0.4      # Scale smoothing factor
+cfg.TEST.POSITION_SMOOTH_FACTOR = 0.2   # Position smoothing factor  
+cfg.TEST.TEMPLATE_UPDATE_INTERVAL = 5   # Min frames between template updates
+cfg.TEST.USE_MULTI_HYPOTHESIS = True    # Enable multi-hypothesis tracking
+cfg.TEST.NUM_HYPOTHESES = 3             # Number of hypothesis candidates
 
 
 def _edict2dict(dest_dict, src_edict):

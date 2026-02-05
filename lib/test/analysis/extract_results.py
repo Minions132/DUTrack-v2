@@ -100,7 +100,7 @@ def calc_seq_err_robust(pred_bb, anno_bb, dataset, target_visible=None):
 
 
 def extract_results(trackers, dataset, report_name, skip_missing_seq=False, plot_bin_gap=0.05,
-                    exclude_invalid_frames=False):
+                    exclude_invalid_frames=False, pr_iou_threshold=0.5):
     settings = env_settings()
     eps = 1e-16
 
@@ -120,6 +120,13 @@ def extract_results(trackers, dataset, report_name, skip_missing_seq=False, plot
                                                dtype=torch.float32)
     ave_success_rate_plot_center_norm = torch.zeros((len(dataset), len(trackers), threshold_set_center.numel()),
                                                     dtype=torch.float32)
+
+    threshold_set_recall = torch.linspace(0.0, 1.0, 101, dtype=torch.float64)
+    ave_pr_curve = torch.zeros((len(dataset), len(trackers), threshold_set_recall.numel()), dtype=torch.float32)
+    pr_ap_all = torch.zeros((len(dataset), len(trackers)), dtype=torch.float32)
+    valid_sequence_pr = torch.ones(len(dataset), dtype=torch.uint8)
+
+    pr_iou_threshold = float(pr_iou_threshold)
 
     valid_sequence = torch.ones(len(dataset), dtype=torch.uint8)
 
@@ -161,6 +168,49 @@ def extract_results(trackers, dataset, report_name, skip_missing_seq=False, plot
             ave_success_rate_plot_center[seq_id, trk_id, :] = (err_center.view(-1, 1) <= threshold_set_center.view(1, -1)).sum(0).float() / seq_length
             ave_success_rate_plot_center_norm[seq_id, trk_id, :] = (err_center_normalized.view(-1, 1) <= threshold_set_center_norm.view(1, -1)).sum(0).float() / seq_length
 
+            # PR curve (requires per-frame confidence scores)
+            scores_path = '{}_all_scores.txt'.format(base_results_path)
+            if os.path.isfile(scores_path):
+                scores = torch.tensor(load_text(str(scores_path), delimiter=('\t', ','), dtype=np.float64))
+
+                if scores.shape[0] != anno_bb.shape[0]:
+                    if scores.shape[0] > anno_bb.shape[0]:
+                        scores = scores[:anno_bb.shape[0]]
+                    else:
+                        pad = torch.zeros((anno_bb.shape[0] - scores.shape[0],), dtype=scores.dtype)
+                        scores = torch.cat((scores, pad), dim=0)
+
+                valid_mask = valid_frame
+                scores_v = scores[valid_mask]
+                overlap_v = err_overlap[valid_mask]
+
+                if scores_v.numel() == 0:
+                    ave_pr_curve[seq_id, trk_id, :] = 0
+                    pr_ap_all[seq_id, trk_id] = 0
+                else:
+                    labels = (overlap_v >= pr_iou_threshold).float()
+                    idx = torch.argsort(scores_v, descending=True)
+                    labels = labels[idx]
+
+                    tp = torch.cumsum(labels, dim=0)
+                    fp = torch.cumsum(1.0 - labels, dim=0)
+
+                    recall = tp / (labels.sum() + eps)
+                    precision = tp / (tp + fp + eps)
+
+                    pr_curve = torch.zeros_like(threshold_set_recall, dtype=torch.float32)
+                    for i, r in enumerate(threshold_set_recall):
+                        mask = recall >= r
+                        if mask.any():
+                            pr_curve[i] = precision[mask].max().float()
+                        else:
+                            pr_curve[i] = 0.0
+
+                    ave_pr_curve[seq_id, trk_id, :] = pr_curve
+                    pr_ap_all[seq_id, trk_id] = torch.trapz(pr_curve.double(), threshold_set_recall).float()
+            else:
+                valid_sequence_pr[seq_id] = 0
+
     print('\n\nComputed results over {} / {} sequences'.format(valid_sequence.long().sum().item(), valid_sequence.shape[0]))
 
     # Prepare dictionary for saving data
@@ -176,7 +226,12 @@ def extract_results(trackers, dataset, report_name, skip_missing_seq=False, plot
                  'avg_overlap_all': avg_overlap_all.tolist(),
                  'threshold_set_overlap': threshold_set_overlap.tolist(),
                  'threshold_set_center': threshold_set_center.tolist(),
-                 'threshold_set_center_norm': threshold_set_center_norm.tolist()}
+                 'threshold_set_center_norm': threshold_set_center_norm.tolist(),
+                 'pr_curve': ave_pr_curve.tolist(),
+                 'pr_ap': pr_ap_all.tolist(),
+                 'threshold_set_recall': threshold_set_recall.tolist(),
+                 'valid_sequence_pr': valid_sequence_pr.tolist(),
+                 'pr_iou_threshold': pr_iou_threshold}
 
     with open(result_plot_path + '/eval_data.pkl', 'wb') as fh:
         pickle.dump(eval_data, fh)

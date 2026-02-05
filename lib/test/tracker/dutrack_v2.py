@@ -46,12 +46,13 @@ class DUTrack(BaseTracker):
                     os.makedirs(self.save_dir)
         # for save boxes from all queries
         self.save_all_boxes = params.save_all_boxes
+        self.save_scores = getattr(params, 'save_scores', False)
         self.z_dict1 = {}
         self.descriptgenRefiner = descriptgenRefiner(params.cfg.MODEL.BACKBONE.BLIP_DIR,params.cfg.MODEL.BACKBONE.BERT_DIR)
         
-        # Ours: Flow Window Consensus parameters
-        self.flow_window_size = getattr(self.cfg.TEST, 'FLOW_WINDOW_SIZE', 1)
-        self.flow_update_interval = getattr(self.cfg.TEST, 'FLOW_UPDATE_INTERVAL', 10)
+        # V2: Simple quality-enhanced tracking
+        self.quality_history = deque(maxlen=20)  # Track quality for filtering
+        self.itm_threshold = getattr(self.cfg.TEST, 'ITM_THRESHOLD', 0.005)
 
     def initialize(self, image, info: dict):
         # forward the template once
@@ -59,68 +60,91 @@ class DUTrack(BaseTracker):
                                                     output_sz=self.params.template_size)
 
         #update descript
-        self.descript = self.descriptgenRefiner(image,cls=info['class'])
+        # Enhanced Prompting
+        init_prompt = f"a photo of {info['class']}, detailed appearance"
+        self.descript = self.descriptgenRefiner(image, cls=init_prompt)
         self.his_state = info['init_bbox']
         self.updata_key = False
         
-        # Ours: Initialize flow buffer for temporal consensus
-        self.flow_buffer = deque(maxlen=self.flow_window_size)
+        # Temporal Flow Consensus Buffer
+        self.flow_buffer = deque(maxlen=self.cfg.TEST.FLOW_WINDOW_SIZE)
         self.update_counter = 0
 
         self.z_patch_arr = z_patch_arr
         template = self.preprocessor.process(z_patch_arr, z_amask_arr)
         with torch.no_grad():
-            # self.z_dict1 = template
             self.memory_frames = [template.tensors]
 
         self.memory_masks = []
-        if self.cfg.MODEL.BACKBONE.CE_LOC:  # use CE module
+        if self.cfg.MODEL.BACKBONE.CE_LOC:
             template_bbox = self.transform_bbox_to_crop(info['init_bbox'], resize_factor,
                                                         template.tensors.device).squeeze(1)
             self.memory_masks.append(generate_mask_cond(self.cfg, 1, template.tensors.device, template_bbox))
         
-        # save states
-        # self.H,self.W,_ = image.shape
         self.state = info['init_bbox']
         self.frame_id = 0
         if self.save_all_boxes:
-            '''save all predicted boxes'''
             all_boxes_save = info['init_bbox'] * self.cfg.MODEL.NUM_OBJECT_QUERIES
+            if self.save_scores:
+                return {"all_boxes": all_boxes_save, "all_scores": 1.0}
             return {"all_boxes": all_boxes_save}
+        if self.save_scores:
+            return {"all_scores": 1.0}
 
-    def ifupdata(self, his, cur, h, w):
-        x1,y1,w1,h1 = his
-        x2,y2,w2,h2 = cur
-        stride = 1/32
+    def compute_language_consensus(self, patch_list, cls_name):
+        """Generates descriptions for all patches and selects semantic centroid."""
+        captions = []
+        prompt = f"a photo of {cls_name}, detailed appearance"
+        
+        for img_patch in patch_list:
+             cap = self.descriptgenRefiner(img_patch, cls=prompt)
+             captions.append(cap)
+        
+        if not captions:
+            return self.descript
+            
+        if len(captions) == 1:
+            return captions[0]
 
-        s1,s2 = w1*h1,w2*h2
-        distance = math.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
-        if s1>s2:
-            i = s2/s1
-        else:
-            i = s1/s2
-        # if i < 0.95 :
-        #     return True
-        # if distance > stride*h or distance > stride*w :
-        #     return True
-        return True
-    
-    def check_flow_update(self):
-        """
-        Ours: Check if we should perform flow consensus update.
-        Simple fixed-interval update with stability check.
-        """
+        tokenizer = self.network.backbone.tokenizer
+        embedder = self.network.backbone.descript_embedding
+        
+        inputs = tokenizer(captions, return_tensors="pt", padding=True, truncation=True, max_length=32).to(self.network.parameters().__next__().device)
+        
+        with torch.no_grad():
+            outputs = embedder(inputs.input_ids)
+            mask = inputs.attention_mask.unsqueeze(-1)
+            sum_embeddings = (outputs * mask).sum(dim=1)
+            sum_mask = mask.sum(dim=1).clamp(min=1e-9)
+            sentence_embeddings = sum_embeddings / sum_mask
+            
+            sentence_embeddings = torch.nn.functional.normalize(sentence_embeddings, p=2, dim=1)
+            sim_matrix = torch.mm(sentence_embeddings, sentence_embeddings.t())
+            
+            sim_scores = sim_matrix.sum(dim=1)
+            best_idx = torch.argmax(sim_scores).item()
+            
+        return captions[best_idx]
+
+    def check_flow_update(self, current_info):
+        """V2: Simplified flow update check with quality filtering."""
         self.update_counter += 1
         
-        # 1. Fixed interval check
-        if self.update_counter % self.flow_update_interval != 0:
-            return False
+        # 1. Fixed Interval Check
+        if self.update_counter % self.cfg.TEST.FLOW_UPDATE_INTERVAL != 0:
+            return False, None, None
             
-        # 2. Buffer must be full
-        if len(self.flow_buffer) < self.flow_window_size:
-            return False
+        # 2. Buffer Check
+        if len(self.flow_buffer) < self.cfg.TEST.FLOW_WINDOW_SIZE:
+            return False, None, None
             
-        # 3. Stability check: box positions should be stable
+        # 3. V2: Quality filter - require minimum average quality
+        scores = np.array([item[3] for item in self.flow_buffer])
+        avg_quality = np.mean(scores)
+        if avg_quality < 0.3:  # Skip update if quality is too low
+            return False, None, None
+            
+        # 4. Stability Check (original logic)
         bboxes = np.array([item[1] for item in self.flow_buffer])
         cx = bboxes[:, 0] + bboxes[:, 2] / 2
         cy = bboxes[:, 1] + bboxes[:, 3] / 2
@@ -130,36 +154,49 @@ class DUTrack(BaseTracker):
         avg_w = np.mean(bboxes[:, 2])
         avg_h = np.mean(bboxes[:, 3])
         
-        # Threshold: variance should be less than 10% of average size
         threshold = ((avg_w + avg_h) / 2 * 0.1) ** 2
         
         if var_cx > threshold or var_cy > threshold:
-            return False  # Unstable tracking, skip update
+            return False, None, None
 
-        return True
+        return True, avg_w, avg_h
+
 
     def track(self, image, info: dict = None):
         H, W, _ = image.shape
         self.frame_id += 1
         x_patch_arr, resize_factor, x_amask_arr = sample_target(image, self.state, self.params.search_factor,
-                                                                output_sz=self.params.search_size)  # (x1, y1, w, h)
+                                                                output_sz=self.params.search_size)
         search = self.preprocessor.process(x_patch_arr, x_amask_arr)
-        if self.updata_key:
-            self.descript = self.descriptgenRefiner(image,cls=info['class'])
-            self.his_state = self.state
-
-        # print(info['num'])
-        # print(self.descript)
         
-        # --------- Ours: Flow Consensus Update Logic ---------
+        # --------- V2: Simplified Consensus Update Logic ---------
+        do_update, _, _ = self.check_flow_update(info)
         consensus_applied = False
-        if self.flow_window_size > 1 and self.check_flow_update():
-            # Perform visual consensus fusion
+        
+        if do_update:
+            # 1. Visual Consensus
             tensor_list = [item[0] for item in self.flow_buffer]
-            score_list = [item[2] for item in self.flow_buffer]
+            score_list = [item[3] for item in self.flow_buffer]
             fused_patch = compute_visual_consensus(tensor_list, score_list=score_list)
             
-            if fused_patch is not None:
+            # 2. Language Consensus
+            numpy_list = [item[2] for item in self.flow_buffer]
+            cls_name = info.get('class', 'object') if info else 'object'
+            best_caption = self.compute_language_consensus(numpy_list, cls_name)
+            
+            # 3. V2: Enhanced ITM verification
+            fused_patch_squeezed = fused_patch.squeeze(0) if fused_patch.dim() == 4 else fused_patch
+            itm_score = self.descriptgenRefiner.compute_matching_score(fused_patch_squeezed, best_caption)
+            
+            # V2: Use quality-based threshold
+            avg_quality = np.mean(score_list)
+            effective_threshold = self.itm_threshold
+            if avg_quality > 0.6:
+                # High quality buffer - be stricter
+                effective_threshold = self.itm_threshold * 1.5
+            
+            if itm_score > effective_threshold:
+                self.descript = best_caption
                 fused_frame = fused_patch.to(self.memory_frames[0].device)
                 self.memory_frames.append(fused_frame)
                 
@@ -168,16 +205,15 @@ class DUTrack(BaseTracker):
                         self.memory_masks.append(self.memory_masks[-1].clone())
                 
                 consensus_applied = True
-        
-        # --------- select memory frames ---------
+
+        # --------- Select memory frames (original logic) ---------
         box_mask_z = None
         if self.frame_id <= self.cfg.TEST.TEMPLATE_NUMBER:
             template_list = self.memory_frames.copy()
-            if self.cfg.MODEL.BACKBONE.CE_LOC:  # use CE module
+            if self.cfg.MODEL.BACKBONE.CE_LOC:
                 box_mask_z = torch.cat(self.memory_masks, dim=1)
         else:
             template_list, box_mask_z = self.select_memory_frames()
-        # --------- select memory frames ---------
 
         with torch.no_grad():
             out_dict = self.network.forward(template=template_list, search=[search.tensors],descript=[[self.descript]])
@@ -185,86 +221,53 @@ class DUTrack(BaseTracker):
         if isinstance(out_dict, list):
             out_dict = out_dict[-1]
 
-        # A = visualize_attn(out_dict['attn'],x_patch_arr,info['path'],info['num'])
-            
         # add hann windows
         pred_score_map = out_dict['score_map']
         response = self.output_window * pred_score_map
         pred_boxes = self.network.box_head.cal_bbox(response, out_dict['size_map'], out_dict['offset_map'])
         pred_boxes = pred_boxes.view(-1, 4)
-        # Baseline: Take the mean of all pred boxes as the final result
-        pred_box = (pred_boxes.mean(dim=0) * self.params.search_size / resize_factor).tolist()  # (cx, cy, w, h) [0,1]
-        # get the final box result
+        pred_box = (pred_boxes.mean(dim=0) * self.params.search_size / resize_factor).tolist()
+        
         self.state = clip_box(self.map_box_back(pred_box, resize_factor), H, W, margin=10)
 
-        self.updata_key = self.ifupdata(self.his_state,self.state,H,W)
-
-        # --------- save memory frames and masks ---------
+        # --------- Update Flow Buffer ---------
         z_patch_arr, z_resize_factor, z_amask_arr = sample_target(image, self.state, self.params.template_factor,
                                                     output_sz=self.params.template_size)
         cur_frame = self.preprocessor.process(z_patch_arr, z_amask_arr)
-        frame = cur_frame.tensors
+        frame_tensor = cur_frame.tensors
         
-        # Ours: Update flow buffer for consensus
         current_score = pred_score_map.max().item()
-        if self.flow_window_size > 1:
-            self.flow_buffer.append((frame.detach().cpu(), 
-                                     self.state.copy() if isinstance(self.state, list) else list(self.state),
-                                     current_score))
-        
-        # Only add frame if consensus was NOT applied
+        self.quality_history.append(current_score)
+        self.flow_buffer.append((frame_tensor.detach().cpu(), self.state.copy() if isinstance(self.state, list) else list(self.state), z_patch_arr, current_score))
+
+        # V2: Only add frame if consensus was NOT applied (same as Ours)
         if not consensus_applied:
-            # mask = cur_frame.mask
+            frame = frame_tensor
             if self.frame_id > self.cfg.TEST.MEMORY_THRESHOLD:
                 frame = frame.detach().cpu()
-                # mask = mask.detach().cpu()
             self.memory_frames.append(frame)
-            if self.cfg.MODEL.BACKBONE.CE_LOC:  # use CE module
+            
+            if self.cfg.MODEL.BACKBONE.CE_LOC:
                 template_bbox = self.transform_bbox_to_crop(self.state, z_resize_factor, frame.device).squeeze(1)
                 self.memory_masks.append(generate_mask_cond(self.cfg, 1, frame.device, template_bbox))
         
-        if 'pred_iou' in out_dict.keys():      # use IoU Head
+        if 'pred_iou' in out_dict.keys():
             pred_iou = out_dict['pred_iou'].squeeze(-1)
             self.memory_ious.append(pred_iou)
-        # --------- save memory frames and masks ---------
         
-        # for debug
-        # if self.debug:
-        #     if not self.use_visdom:
-        #         x1, y1, w, h = self.state
-        #         image_BGR = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-        #         cv2.rectangle(image_BGR, (int(x1),int(y1)), (int(x1+w),int(y1+h)), color=(0,0,255), thickness=2)
-        #         save_path = os.path.join(self.save_dir, "%04d.jpg" % self.frame_id)
-        #         cv2.imwrite(save_path, image_BGR)
-        #     else:
-        #         self.visdom.register((image, info['gt_bbox'].tolist(), self.state), 'Tracking', 1, 'Tracking')
-        #
-        #         self.visdom.register(torch.from_numpy(x_patch_arr).permute(2, 0, 1), 'image', 1, 'search_region')
-        #         self.visdom.register(torch.from_numpy(self.z_patch_arr).permute(2, 0, 1), 'image', 1, 'template')
-        #         self.visdom.register(pred_score_map.view(self.feat_sz, self.feat_sz), 'heatmap', 1, 'score_map')
-        #         self.visdom.register((pred_score_map * self.output_window).view(self.feat_sz, self.feat_sz), 'heatmap', 1, 'score_map_hann')
-        #
-        #         if 'removed_indexes_s' in out_dict and out_dict['removed_indexes_s']:
-        #             removed_indexes_s = out_dict['removed_indexes_s']
-        #             removed_indexes_s = [removed_indexes_s_i.cpu().numpy() for removed_indexes_s_i in removed_indexes_s]
-        #             masked_search = gen_visualization(x_patch_arr, removed_indexes_s)
-        #             self.visdom.register(torch.from_numpy(masked_search).permute(2, 0, 1), 'image', 1, 'masked_search')
-        #
-        #         while self.pause_mode:
-        #             if self.step:
-        #                 self.step = False
-        #                 break
-
         if self.save_all_boxes:
-            '''save all predictions'''
             all_boxes = self.map_box_back_batch(pred_boxes * self.params.search_size / resize_factor, resize_factor)
-            all_boxes_save = all_boxes.view(-1).tolist()  # (4N, )
-            return {"target_bbox": self.state,
-                    "all_boxes": all_boxes_save}
+            all_boxes_save = all_boxes.view(-1).tolist()
+            if self.save_scores:
+                return {"target_bbox": self.state, "all_boxes": all_boxes_save, "all_scores": current_score}
+            return {"target_bbox": self.state, "all_boxes": all_boxes_save}
         else:
+            if self.save_scores:
+                return {"target_bbox": self.state, "all_scores": current_score}
             return {"target_bbox": self.state}
 
     def select_memory_frames(self):
+        """Original memory frame selection (temporal uniform sampling)."""
         num_segments = self.cfg.TEST.TEMPLATE_NUMBER
         cur_frame_idx = self.frame_id
         if num_segments != 1:
@@ -305,7 +308,7 @@ class DUTrack(BaseTracker):
 
     def map_box_back_batch(self, pred_box: torch.Tensor, resize_factor: float):
         cx_prev, cy_prev = self.state[0] + 0.5 * self.state[2], self.state[1] + 0.5 * self.state[3]
-        cx, cy, w, h = pred_box.unbind(-1) # (N,4) --> (N,)
+        cx, cy, w, h = pred_box.unbind(-1)
         half_side = 0.5 * self.params.search_size / resize_factor
         cx_real = cx + (cx_prev - half_side)
         cy_real = cy + (cy_prev - half_side)
@@ -313,14 +316,12 @@ class DUTrack(BaseTracker):
 
     def add_hook(self):
         conv_features, enc_attn_weights, dec_attn_weights = [], [], []
-
         for i in range(12):
             self.network.backbone.blocks[i].attn.register_forward_hook(
-                # lambda self, input, output: enc_attn_weights.append(output[1])
                 lambda self, input, output: enc_attn_weights.append(output[1])
             )
-
         self.enc_attn_weights = enc_attn_weights
+
 
 def get_tracker_class():
     return DUTrack
