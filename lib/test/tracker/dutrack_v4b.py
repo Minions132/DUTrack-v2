@@ -1,17 +1,19 @@
 """
-DUTrack Enhanced V3.1 - 基于V3成功经验的稳健改进
+DUTrack Enhanced V4b - 质量门控的模板管理
 
-V3成功策略（保留）：
+V3成功经验（保留）：
 1. 质量感知模板选择 - 每个时间段选最高置信度帧
-2. 保持原始预测不变 - 不做后处理
-3. 智能语言描述更新 - 位置稳定时更新
+2. 保持原始预测不变
+3. 智能语言描述更新
 
-V3.1新增改进（保守策略）：
-1. 更严格的高置信度阈值用于模板选择
-2. 增加最近帧权重（仅在选择时，不改变槽位分配）
-3. 尺度稳定性检查加入语言描述更新条件
+V4b新策略（在V4a基础上增加）：
+1. 质量门控的模板存储 - 只有高质量帧才存入模板库
+2. 最小模板间隔 - 避免连续帧相似度过高
+3. 保持模板多样性 - 确保时间分布均匀
 
-Author: Enhanced V3.1 - Conservative improvement over V3
+核心idea：存储更少但更高质量的模板，减少低质量模板对跟踪的干扰
+
+Author: V4b - Quality-gated template storage
 """
 
 import math
@@ -60,12 +62,14 @@ class DUTrack(BaseTracker):
         self.z_dict1 = {}
         self.descriptgenRefiner = descriptgenRefiner(params.cfg.MODEL.BACKBONE.BLIP_DIR, params.cfg.MODEL.BACKBONE.BERT_DIR)
         
-        # ============ Enhanced V3.1 Parameters ============
+        # V4b Parameters
         self.high_conf_threshold = getattr(self.cfg.TEST, 'HIGH_CONF_THRESHOLD', 0.7)
         self.low_conf_threshold = getattr(self.cfg.TEST, 'LOW_CONF_THRESHOLD', 0.3)
         
-        # V3.1: 更高的模板选择阈值
-        self.template_quality_threshold = 0.65
+        # 质量门控阈值：只有置信度高于此值的帧才存储为模板
+        self.template_store_threshold = 0.5
+        # 最小模板间隔：连续存储的模板之间至少间隔这么多帧
+        self.min_template_interval = 3
 
     def initialize(self, image, info: dict):
         z_patch_arr, resize_factor, z_amask_arr = sample_target(image, info['init_bbox'], self.params.template_factor,
@@ -81,24 +85,24 @@ class DUTrack(BaseTracker):
         with torch.no_grad():
             self.memory_frames = [template.tensors]
         
-        # ============ V3.1: 质量存储 ============
-        self.frame_confidence = {0: 1.0}
+        # V4b: 存储帧ID和置信度的映射
+        self.frame_to_template_idx = {0: 0}  # frame_id -> template_index
+        self.template_frame_ids = [0]  # 每个模板对应的帧ID
+        self.template_confidence = {0: 1.0}  # 模板的置信度
         
-        # 置信度历史
         self.conf_history = deque(maxlen=10)
         self.conf_history.append(1.0)
         
-        # 位置历史
         self.position_history = deque(maxlen=5)
         self.position_history.append((info['init_bbox'][0] + info['init_bbox'][2]/2,
                                       info['init_bbox'][1] + info['init_bbox'][3]/2))
         
-        # V3.1: 尺度历史
         self.scale_history = deque(maxlen=5)
         self.scale_history.append((info['init_bbox'][2], info['init_bbox'][3]))
         
         self.high_conf_streak = 0
         self.last_desc_update = 0
+        self.last_template_frame = 0  # 上一个存储模板的帧ID
 
         self.memory_masks = []
         if self.cfg.MODEL.BACKBONE.CE_LOC:
@@ -130,7 +134,7 @@ class DUTrack(BaseTracker):
         return std_cx < threshold and std_cy < threshold
 
     def is_scale_stable(self):
-        """V3.1: 检查尺度是否稳定"""
+        """检查尺度是否稳定"""
         if len(self.scale_history) < 3:
             return False
         
@@ -141,11 +145,10 @@ class DUTrack(BaseTracker):
         avg_w, avg_h = np.mean(w_list), np.mean(h_list)
         std_w, std_h = np.std(w_list), np.std(h_list)
         
-        # 相对标准差小于15%
         return (std_w / (avg_w + 1e-6) < 0.15) and (std_h / (avg_h + 1e-6) < 0.15)
 
     def should_update_description(self, confidence):
-        """V3.1: 判断是否应该更新语言描述"""
+        """判断是否应该更新语言描述"""
         if confidence < self.high_conf_threshold:
             return False
         
@@ -155,7 +158,6 @@ class DUTrack(BaseTracker):
         if not self.is_position_stable():
             return False
         
-        # V3.1: 尺度也要稳定
         if not self.is_scale_stable():
             return False
         
@@ -164,59 +166,59 @@ class DUTrack(BaseTracker):
         
         return True
 
+    def should_store_template(self, confidence):
+        """
+        V4b: 判断是否应该存储当前帧为模板
+        条件：
+        1. 置信度高于阈值
+        2. 距离上次存储的间隔足够
+        """
+        # 条件1：置信度门控
+        if confidence < self.template_store_threshold:
+            return False
+        
+        # 条件2：最小间隔
+        if self.frame_id - self.last_template_frame < self.min_template_interval:
+            return False
+        
+        return True
+
     def select_memory_frames_quality_aware(self):
         """
-        V3.1优化版: 质量感知的模板选择策略
-        - 时间复杂度: O(num_templates * sample_size) 而非 O(total_frames)
-        - 每个时间段只采样固定数量的候选帧进行比较
+        V4b: 基于高质量模板的选择策略
+        由于存储的都是高质量模板，选择策略可以更简单
         """
         num_templates = self.cfg.TEST.TEMPLATE_NUMBER
-        cur_frame_idx = self.frame_id
-        total_frames = len(self.memory_frames)
+        total_templates = len(self.memory_frames)
         
-        if cur_frame_idx <= num_templates or total_frames <= num_templates:
-            select_frames = self.memory_frames[:num_templates]
+        if total_templates <= num_templates:
+            select_frames = self.memory_frames[:total_templates]
             if self.cfg.MODEL.BACKBONE.CE_LOC and len(self.memory_masks) > 0:
-                select_masks = self.memory_masks[:num_templates]
+                select_masks = self.memory_masks[:total_templates]
                 return select_frames, torch.cat(select_masks, dim=1) if select_masks else None
             return select_frames, None
         
         # 始终包含第一帧
         selected_indices = [0]
         
-        # 将剩余帧分成 (num_templates - 1) 个时间段
+        # 将模板分成 (num_templates - 1) 个时间段
         num_segments = num_templates - 1
-        segment_size = (total_frames - 1) // num_segments
-        
-        # 每个时间段最多采样5个候选帧进行比较（大幅降低复杂度）
-        max_candidates_per_segment = 5
+        segment_size = max(1, (total_templates - 1) // num_segments)
         
         for seg in range(num_segments):
             start_idx = 1 + seg * segment_size
-            end_idx = min(1 + (seg + 1) * segment_size, total_frames)
+            end_idx = min(1 + (seg + 1) * segment_size, total_templates)
             
-            if start_idx >= total_frames:
+            if start_idx >= total_templates:
                 break
             
-            segment_len = end_idx - start_idx
+            # 在每个时间段内选择置信度最高的模板
+            best_idx = start_idx
+            best_score = self.template_confidence.get(self.template_frame_ids[start_idx], 0.5)
             
-            # 在时间段内均匀采样候选帧（而非遍历所有帧）
-            if segment_len <= max_candidates_per_segment:
-                candidate_indices = list(range(start_idx, end_idx))
-            else:
-                step = segment_len // max_candidates_per_segment
-                candidate_indices = [start_idx + i * step for i in range(max_candidates_per_segment)]
-                # 确保包含最后一个帧（最新的）
-                if end_idx - 1 not in candidate_indices:
-                    candidate_indices[-1] = end_idx - 1
-            
-            # 在采样的候选帧中选择置信度最高的
-            best_idx = candidate_indices[0]
-            best_score = self.frame_confidence.get(best_idx, 0.5)
-            
-            for idx in candidate_indices:
-                conf = self.frame_confidence.get(idx, 0.5)
-                # 微小的新近性加成
+            for idx in range(start_idx, end_idx):
+                frame_id = self.template_frame_ids[idx]
+                conf = self.template_confidence.get(frame_id, 0.5)
                 recency_bonus = (idx - start_idx) * 0.0001
                 score = conf + recency_bonus
                 
@@ -228,9 +230,8 @@ class DUTrack(BaseTracker):
                 selected_indices.append(best_idx)
         
         # 确保选择了足够的模板
-        while len(selected_indices) < num_templates and len(selected_indices) < total_frames:
-            # 添加最近的帧
-            for idx in range(total_frames - 1, 0, -1):
+        while len(selected_indices) < num_templates and len(selected_indices) < total_templates:
+            for idx in range(total_templates - 1, 0, -1):
                 if idx not in selected_indices:
                     selected_indices.append(idx)
                     break
@@ -264,8 +265,8 @@ class DUTrack(BaseTracker):
             output_sz=self.params.search_size)
         search = self.preprocessor.process(x_patch_arr, x_amask_arr)
 
-        # ============ 质量感知模板选择 ============
-        if self.frame_id <= self.cfg.TEST.TEMPLATE_NUMBER:
+        # 质量感知模板选择
+        if len(self.memory_frames) <= self.cfg.TEST.TEMPLATE_NUMBER:
             template_list = self.memory_frames.copy()
             if self.cfg.MODEL.BACKBONE.CE_LOC:
                 box_mask_z = torch.cat(self.memory_masks, dim=1) if self.memory_masks else None
@@ -274,7 +275,7 @@ class DUTrack(BaseTracker):
         else:
             template_list, box_mask_z = self.select_memory_frames_quality_aware()
 
-        # ============ 网络推理 ============
+        # 网络推理
         with torch.no_grad():
             out_dict = self.network.forward(
                 template=template_list, 
@@ -284,7 +285,7 @@ class DUTrack(BaseTracker):
         if isinstance(out_dict, list):
             out_dict = out_dict[-1]
             
-        # ============ 预测（保持原始逻辑不变） ============
+        # 预测（保持原始逻辑！）
         pred_score_map = out_dict['score_map']
         response = self.output_window * pred_score_map
         
@@ -310,24 +311,30 @@ class DUTrack(BaseTracker):
         self.position_history.append(current_center)
         self.scale_history.append((self.state[2], self.state[3]))
         
-        # ============ 保存模板 ============
-        z_patch_arr, z_resize_factor, z_amask_arr = sample_target(
-            image, self.state, self.params.template_factor,
-            output_sz=self.params.template_size)
-        cur_frame = self.preprocessor.process(z_patch_arr, z_amask_arr)
-        frame = cur_frame.tensors
-        
-        if self.frame_id > self.cfg.TEST.MEMORY_THRESHOLD:
-            frame = frame.detach().cpu()
-        
-        self.memory_frames.append(frame)
-        self.frame_confidence[self.frame_id] = confidence
-        
-        if self.cfg.MODEL.BACKBONE.CE_LOC:
-            template_bbox = self.transform_bbox_to_crop(self.state, z_resize_factor, frame.device).squeeze(1)
-            self.memory_masks.append(generate_mask_cond(self.cfg, 1, frame.device, template_bbox))
+        # V4b: 质量门控的模板存储
+        if self.should_store_template(confidence):
+            z_patch_arr, z_resize_factor, z_amask_arr = sample_target(
+                image, self.state, self.params.template_factor,
+                output_sz=self.params.template_size)
+            cur_frame = self.preprocessor.process(z_patch_arr, z_amask_arr)
+            frame = cur_frame.tensors
+            
+            if self.frame_id > self.cfg.TEST.MEMORY_THRESHOLD:
+                frame = frame.detach().cpu()
+            
+            # 存储模板
+            template_idx = len(self.memory_frames)
+            self.memory_frames.append(frame)
+            self.template_frame_ids.append(self.frame_id)
+            self.template_confidence[self.frame_id] = confidence
+            self.frame_to_template_idx[self.frame_id] = template_idx
+            self.last_template_frame = self.frame_id
+            
+            if self.cfg.MODEL.BACKBONE.CE_LOC:
+                template_bbox = self.transform_bbox_to_crop(self.state, z_resize_factor, frame.device).squeeze(1)
+                self.memory_masks.append(generate_mask_cond(self.cfg, 1, frame.device, template_bbox))
 
-        # ============ 语言描述更新 ============
+        # 语言描述更新
         if info is not None and self.should_update_description(confidence):
             self.descript = self.descriptgenRefiner(image, cls=info.get('class', None))
             self.his_state = self.state
