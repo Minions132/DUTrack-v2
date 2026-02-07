@@ -1,0 +1,111 @@
+# DUTrack GOT-10k V5e 配置
+# Response Quality-Enhanced Template Management
+# 核心改进：
+# 1. 使用响应图峰值锐度作为增强质量指标
+# 2. 启用尺寸匹配的模板选择
+# 3. 保持V4b的质量门控策略
+DATA:
+  MAX_SAMPLE_INTERVAL: 200
+  MEAN:
+    - 0.485
+    - 0.456
+    - 0.406
+  SEARCH:
+    CENTER_JITTER: 3.5
+    FACTOR: 4.0
+    NUMBER: 2
+    SCALE_JITTER: 0.5
+    SIZE: 256
+  STD:
+    - 0.229
+    - 0.224
+    - 0.225
+  TEMPLATE:
+    CENTER_JITTER: 0
+    FACTOR: 2.0
+    NUMBER: 3
+    SCALE_JITTER: 0
+    SIZE: 128
+  TRAIN:
+    DATASETS_NAME:
+      - GOT10K_train_full
+    DATASETS_RATIO:
+      - 1
+    SAMPLE_PER_EPOCH: 30000
+  VAL:
+    DATASETS_NAME:
+      - GOT10K_official_val
+    DATASETS_RATIO:
+      - 1
+    SAMPLE_PER_EPOCH: 6000
+MODEL:
+  BACKBONE:
+    ADD_CLS_TOKEN: true
+    ATTN_TYPE: concat
+    CE_KEEP_RATIO:
+      - 0.7
+      - 0.7
+      - 0.7
+    CE_LOC:
+      - 3
+      - 6
+      - 9
+    CE_TEMPLATE_RANGE: CTR_POINT
+    STRIDE: 16
+    TOP_K: 3
+    TYPE: itpn_base
+    BERT_DIR: "bert-base-uncased"
+    BLIP_DIR: "Salesforce/blip-image-captioning-base"
+  EXTRA_MERGER: false
+  HEAD:
+    NUM_CHANNELS: 256
+    TYPE: CENTER
+  PRETRAIN_FILE: DUTrack_Pretrained_256_got.pth.tar
+  RETURN_INTER: false
+TEST:
+  EPOCH: 1
+  MEMORY_THRESHOLD: 1000
+  SEARCH_FACTOR: 4.0
+  SEARCH_SIZE: 256
+  TEMPLATE_FACTOR: 2.0
+  TEMPLATE_NUMBER: 4
+  TEMPLATE_SIZE: 128
+
+  HIGH_CONF_THRESHOLD: 0.7
+  LOW_CONF_THRESHOLD: 0.3
+
+  # V5e: 质量门控参数 (与V4b保持一致)
+  TEMPLATE_STORE_THRESHOLD: 0.5
+  MID_CONF_THRESHOLD: 0.4
+  MIN_TEMPLATE_INTERVAL: 3
+  SCALE_DIVERSITY_THRESHOLD: 0.25
+
+  # V5e新增: 尺寸匹配和峰值锐度参数
+  SIZE_MATCH_WEIGHT: 0.15 # 尺寸匹配权重
+  CONF_WEIGHT: 0.85 # 质量置信度权重
+  PEAK_SHARPNESS_TOPK: 10 # 峰值锐度计算的top-k值
+  SHARPNESS_WEIGHT: 0.3 # 锐度在增强质量中的权重
+
+  SAVE_SCORES: true
+  PR_IOU_THRESHOLD: 0.5
+
+TRAIN:
+  AMP: false
+  BACKBONE_MULTIPLIER: 0.1
+  BATCH_SIZE: 8
+  BBOX_TASK: true
+  DROP_PATH_RATE: 0.1
+  EPOCH: 30
+  GIOU_WEIGHT: 2.0
+  GRAD_CLIP_NORM: 0.1
+  L1_WEIGHT: 5.0
+  LR: 0.0001
+  LR_DROP_EPOCH: 20
+  NUM_WORKER: 10
+  OPTIMIZER: ADAMW
+  PRINT_INTERVAL: 50
+  SCHEDULER:
+    DECAY_RATE: 0.1
+    TYPE: step
+  VAL_EPOCH_INTERVAL: 2000000
+  WEIGHT_DECAY: 0.0001

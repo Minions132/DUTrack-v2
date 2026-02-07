@@ -1,19 +1,17 @@
 """
-DUTrack Enhanced V4b - 质量门控的模板管理
+DUTrack Enhanced V5e - Response Quality-Enhanced Template Management
 
-V3成功经验（保留）：
-1. 质量感知模板选择 - 每个时间段选最高置信度帧
-2. 保持原始预测不变
-3. 智能语言描述更新
+基于V4b的改进：
+1. 使用响应图质量（峰值锐度）作为更丰富的置信度指标
+2. 启用尺寸匹配的模板选择
+3. 保持V4b的质量门控模板存储策略
 
-V4b新策略（在V4a基础上增加）：
-1. 质量门控的模板存储 - 只有高质量帧才存入模板库
-2. 最小模板间隔 - 避免连续帧相似度过高
-3. 保持模板多样性 - 确保时间分布均匀
+核心idea：
+- 峰值锐度 = max_score / top_k_mean，锐度高表示跟踪更可靠
+- 使用增强的质量指标进行模板存储和选择决策
+- 尺寸匹配帮助选择与当前目标更相关的模板
 
-核心idea：存储更少但更高质量的模板，减少低质量模板对跟踪的干扰
-
-Author: V4b - Quality-gated template storage
+Author: V5e - Response Quality-Enhanced Template Management
 """
 
 import math
@@ -62,22 +60,23 @@ class DUTrack(BaseTracker):
         self.z_dict1 = {}
         self.descriptgenRefiner = descriptgenRefiner(params.cfg.MODEL.BACKBONE.BLIP_DIR, params.cfg.MODEL.BACKBONE.BERT_DIR)
         
-        # V4b Parameters
+        # V5e Parameters (基于V4b)
         self.high_conf_threshold = getattr(self.cfg.TEST, 'HIGH_CONF_THRESHOLD', 0.7)
         self.low_conf_threshold = getattr(self.cfg.TEST, 'LOW_CONF_THRESHOLD', 0.3)
         
-        # 质量门控阈值：只有置信度高于此值的帧才存储为模板
+        # 质量门控阈值
         self.template_store_threshold = getattr(self.cfg.TEST, 'TEMPLATE_STORE_THRESHOLD', 0.5)
-        # 最小模板间隔：连续存储的模板之间至少间隔这么多帧
         self.min_template_interval = getattr(self.cfg.TEST, 'MIN_TEMPLATE_INTERVAL', 3)
-        # 允许“尺度多样性”补充模板的次高阈值
         self.mid_conf_threshold = getattr(self.cfg.TEST, 'MID_CONF_THRESHOLD', 0.4)
-        # 当尺度变化超过此比例时，允许额外存储模板以提高尺度覆盖
         self.scale_diversity_threshold = getattr(self.cfg.TEST, 'SCALE_DIVERSITY_THRESHOLD', 0.25)
-        # 质量选择时，尺度匹配的权重（0表示禁用）
-        self.size_match_weight = getattr(self.cfg.TEST, 'SIZE_MATCH_WEIGHT', 0.0)
-        # 置信度权重（与尺度匹配加和，不需要归一化）
-        self.conf_weight = getattr(self.cfg.TEST, 'CONF_WEIGHT', 1.0)
+        
+        # V5e新增：尺寸匹配权重和峰值锐度参数
+        self.size_match_weight = getattr(self.cfg.TEST, 'SIZE_MATCH_WEIGHT', 0.15)
+        self.conf_weight = getattr(self.cfg.TEST, 'CONF_WEIGHT', 0.85)
+        
+        # V5e: 峰值锐度参数 - 用于计算增强的质量分数
+        self.peak_sharpness_topk = getattr(self.cfg.TEST, 'PEAK_SHARPNESS_TOPK', 10)
+        self.sharpness_weight = getattr(self.cfg.TEST, 'SHARPNESS_WEIGHT', 0.3)
 
     def initialize(self, image, info: dict):
         z_patch_arr, resize_factor, z_amask_arr = sample_target(image, info['init_bbox'], self.params.template_factor,
@@ -93,11 +92,13 @@ class DUTrack(BaseTracker):
         with torch.no_grad():
             self.memory_frames = [template.tensors]
         
-        # V4b: 存储帧ID和置信度的映射
-        self.frame_to_template_idx = {0: 0}  # frame_id -> template_index
-        self.template_frame_ids = [0]  # 每个模板对应的帧ID
-        self.template_sizes = [(info['init_bbox'][2], info['init_bbox'][3])]  # 每个模板的(w,h)
-        self.template_confidence = {0: 1.0}  # 模板的置信度
+        # 存储帧ID和置信度的映射
+        self.frame_to_template_idx = {0: 0}
+        self.template_frame_ids = [0]
+        self.template_sizes = [(info['init_bbox'][2], info['init_bbox'][3])]
+        self.template_confidence = {0: 1.0}
+        # V5e: 存储增强质量分数
+        self.template_quality = {0: 1.0}
         
         self.conf_history = deque(maxlen=10)
         self.conf_history.append(1.0)
@@ -111,7 +112,7 @@ class DUTrack(BaseTracker):
         
         self.high_conf_streak = 0
         self.last_desc_update = 0
-        self.last_template_frame = 0  # 上一个存储模板的帧ID
+        self.last_template_frame = 0
 
         self.memory_masks = []
         if self.cfg.MODEL.BACKBONE.CE_LOC:
@@ -124,6 +125,42 @@ class DUTrack(BaseTracker):
         if self.save_all_boxes:
             all_boxes_save = info['init_bbox'] * self.cfg.MODEL.NUM_OBJECT_QUERIES
             return {"all_boxes": all_boxes_save}
+
+    def compute_peak_sharpness(self, response_map):
+        """
+        V5e: 计算响应图的峰值锐度
+        锐度 = max_value / top_k_mean
+        锐度越高表示响应越集中，跟踪越可靠
+        """
+        flat_response = response_map.view(-1)
+        max_val = flat_response.max().item()
+        
+        # 获取top-k值
+        k = min(self.peak_sharpness_topk, flat_response.numel())
+        topk_vals, _ = torch.topk(flat_response, k)
+        topk_mean = topk_vals.mean().item()
+        
+        # 计算锐度：max / mean_topk
+        # 值在1附近，>1表示峰值比周围更突出
+        sharpness = max_val / (topk_mean + 1e-8)
+        
+        # 归一化到合理范围 [0.5, 1.5] -> [0, 1]
+        # 典型锐度值在1-3之间
+        normalized_sharpness = min(1.0, max(0.0, (sharpness - 1.0) / 2.0 + 0.5))
+        
+        return normalized_sharpness
+
+    def compute_enhanced_quality(self, confidence, response_map):
+        """
+        V5e: 计算增强的质量分数
+        结合原始置信度和峰值锐度
+        """
+        sharpness = self.compute_peak_sharpness(response_map)
+        
+        # 加权组合：主要依赖置信度，锐度作为调整
+        enhanced_quality = (1 - self.sharpness_weight) * confidence + self.sharpness_weight * sharpness
+        
+        return enhanced_quality, sharpness
 
     def is_position_stable(self):
         """检查位置是否稳定"""
@@ -184,22 +221,19 @@ class DUTrack(BaseTracker):
         dh = abs(cur_h - last_h) / (last_h + 1e-6)
         return max(dw, dh) >= self.scale_diversity_threshold
 
-    def should_store_template(self, confidence):
+    def should_store_template(self, enhanced_quality, confidence):
         """
-        V4b: 判断是否应该存储当前帧为模板
-        条件：
-        1. 置信度高于阈值
-        2. 距离上次存储的间隔足够
+        V5e: 使用增强质量判断是否存储模板
         """
         # 条件1：最小间隔
         if self.frame_id - self.last_template_frame < self.min_template_interval:
             return False
 
-        # 条件2：高置信度直接存储
-        if confidence >= self.template_store_threshold:
+        # 条件2：增强质量高于阈值直接存储
+        if enhanced_quality >= self.template_store_threshold:
             return True
 
-        # 条件3：尺度多样性补充（稳定状态 + 中等置信度）
+        # 条件3：尺度多样性补充
         if confidence >= self.mid_conf_threshold:
             if not self.is_position_stable() or not self.is_scale_stable():
                 return False
@@ -211,8 +245,7 @@ class DUTrack(BaseTracker):
 
     def select_memory_frames_quality_aware(self):
         """
-        V4b: 基于高质量模板的选择策略
-        由于存储的都是高质量模板，选择策略可以更简单
+        V5e: 基于增强质量和尺寸匹配的模板选择
         """
         num_templates = self.cfg.TEST.TEMPLATE_NUMBER
         total_templates = len(self.memory_frames)
@@ -238,19 +271,25 @@ class DUTrack(BaseTracker):
             if start_idx >= total_templates:
                 break
             
-            # 在每个时间段内选择置信度最高的模板
+            # 在每个时间段内选择综合得分最高的模板
             best_idx = start_idx
-            best_score = self.template_confidence.get(self.template_frame_ids[start_idx], 0.5)
+            best_score = -1
             
             for idx in range(start_idx, end_idx):
                 frame_id = self.template_frame_ids[idx]
-                conf = self.template_confidence.get(frame_id, 0.5)
+                
+                # V5e: 使用增强质量分数
+                quality = self.template_quality.get(frame_id, 0.5)
                 recency_bonus = (idx - start_idx) * 0.0001
-                score = self.conf_weight * conf + recency_bonus
+                
+                # 综合得分：质量 + 时间邻近性
+                score = self.conf_weight * quality + recency_bonus
 
+                # V5e: 尺寸匹配得分
                 if self.size_match_weight > 0 and idx < len(self.template_sizes):
                     cur_w, cur_h = self.state[2], self.state[3]
                     tpl_w, tpl_h = self.template_sizes[idx]
+                    # IoU-style尺寸相似度
                     w_sim = min(cur_w, tpl_w) / (max(cur_w, tpl_w) + 1e-6)
                     h_sim = min(cur_h, tpl_h) / (max(cur_h, tpl_h) + 1e-6)
                     size_sim = w_sim * h_sim
@@ -323,7 +362,10 @@ class DUTrack(BaseTracker):
         pred_score_map = out_dict['score_map']
         response = self.output_window * pred_score_map
         
+        # V5e: 计算原始置信度和增强质量
         confidence = pred_score_map.max().item()
+        enhanced_quality, sharpness = self.compute_enhanced_quality(confidence, pred_score_map)
+        
         self.conf_history.append(confidence)
         
         if confidence > self.high_conf_threshold:
@@ -334,7 +376,7 @@ class DUTrack(BaseTracker):
         pred_boxes = self.network.box_head.cal_bbox(response, out_dict['size_map'], out_dict['offset_map'])
         pred_boxes = pred_boxes.view(-1, 4)
         
-        # 原始预测逻辑
+        # 原始预测逻辑 - 不做任何修改！
         pred_box = (pred_boxes.mean(dim=0) * self.params.search_size / resize_factor).tolist()
         new_state = clip_box(self.map_box_back(pred_box, resize_factor), H, W, margin=10)
         
@@ -345,8 +387,8 @@ class DUTrack(BaseTracker):
         self.position_history.append(current_center)
         self.scale_history.append((self.state[2], self.state[3]))
         
-        # V4b: 质量门控的模板存储
-        if self.should_store_template(confidence):
+        # V5e: 使用增强质量进行模板存储判断
+        if self.should_store_template(enhanced_quality, confidence):
             z_patch_arr, z_resize_factor, z_amask_arr = sample_target(
                 image, self.state, self.params.template_factor,
                 output_sz=self.params.template_size)
@@ -362,6 +404,8 @@ class DUTrack(BaseTracker):
             self.template_frame_ids.append(self.frame_id)
             self.template_sizes.append((self.state[2], self.state[3]))
             self.template_confidence[self.frame_id] = confidence
+            # V5e: 存储增强质量
+            self.template_quality[self.frame_id] = enhanced_quality
             self.frame_to_template_idx[self.frame_id] = template_idx
             self.last_template_frame = self.frame_id
             

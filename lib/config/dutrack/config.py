@@ -131,6 +131,24 @@ cfg.TEST.TEMPLATE_UPDATE_INTERVAL = 5   # Min frames between template updates
 cfg.TEST.USE_MULTI_HYPOTHESIS = True    # Enable multi-hypothesis tracking
 cfg.TEST.NUM_HYPOTHESES = 3             # Number of hypothesis candidates
 
+# V4b/V5d: Quality-gated template management parameters
+cfg.TEST.TEMPLATE_STORE_THRESHOLD = 0.5    # Min confidence to store template
+cfg.TEST.MID_CONF_THRESHOLD = 0.4          # Mid-level confidence threshold
+cfg.TEST.MIN_TEMPLATE_INTERVAL = 3         # Min frames between template storage
+cfg.TEST.SCALE_DIVERSITY_THRESHOLD = 0.25  # Scale diversity threshold
+cfg.TEST.SIZE_MATCH_WEIGHT = 0.0           # Size matching weight in template selection
+cfg.TEST.CONF_WEIGHT = 1.0                 # Confidence weight in template selection
+cfg.TEST.USE_RESPONSE_WEIGHTED_FUSION = False  # Enable response-weighted prediction fusion
+cfg.TEST.FUSION_TEMPERATURE = 1.0          # Temperature for softmax in fusion
+
+# V5e: Peak sharpness parameters for enhanced quality assessment
+cfg.TEST.PEAK_SHARPNESS_TOPK = 10          # Top-k for peak sharpness calculation
+cfg.TEST.SHARPNESS_WEIGHT = 0.3            # Sharpness weight in enhanced quality
+
+# V6: Appearance diversity parameters for template selection
+cfg.TEST.DIVERSITY_WEIGHT = 0.2            # Diversity weight in final template selection score
+cfg.TEST.QUALITY_WEIGHT = 0.8              # Quality weight in final template selection score
+
 
 def _edict2dict(dest_dict, src_edict):
     if isinstance(dest_dict, dict) and isinstance(src_edict, dict):

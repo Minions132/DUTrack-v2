@@ -1,15 +1,12 @@
 #!/usr/bin/env python
 """
-DUTrack V4 测试和对比脚本
+DUTrack V4测试和对比脚本
 
 用法:
-    # 测试V4版本
-    python tracking/test_v4.py --tracker v4 --dataset got10k_val
+    # 测试V4b版本
+    python tracking/test_v4.py --tracker v4b --dataset got10k_val
     
-    # 测试V4a版本（最小改动）
-    python tracking/test_v4.py --tracker v4a --dataset got10k_val
-    
-    # 测试所有版本并对比
+    # 测试并对比
     python tracking/test_v4.py --compare --dataset got10k_val
     
     # 只分析已有结果
@@ -30,9 +27,9 @@ def get_tracker_config(version):
     configs = {
         'baseline': ('dutrack', 'dutrack_256_got_baseline'),
         'enhanced': ('dutrack_enhanced', 'dutrack_256_got_enhanced'),
-        'v4': ('dutrack_v4', 'dutrack_256_got_v4'),
-        'v4a': ('dutrack_v4a', 'dutrack_256_got_v4a'),
         'v4b': ('dutrack_v4b', 'dutrack_256_got_v4b'),
+        'v5c': ('dutrack_v4b', 'dutrack_256_got_v5c'),
+        'v5e': ('dutrack_v5e', 'dutrack_256_got_v5e'),
     }
     return configs.get(version)
 
@@ -78,8 +75,8 @@ def analyze_results(versions, dataset_name='got10k_val'):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='DUTrack V4 测试和对比脚本')
-    parser.add_argument('--tracker', type=str, choices=['baseline', 'enhanced', 'v4', 'v4a', 'v4b'],
+    parser = argparse.ArgumentParser(description='DUTrack V4测试和对比脚本')
+    parser.add_argument('--tracker', type=str, choices=['baseline', 'enhanced', 'v4b', 'v5c', 'v5e'],
                         help='要测试的tracker版本')
     parser.add_argument('--dataset', type=str, default='got10k_val',
                         help='数据集名称 (default: got10k_val)')
@@ -96,11 +93,11 @@ def main():
     
     if args.analyze:
         # 只分析已有结果
-        versions = ['baseline', 'v4', 'v4a', 'v4b']
+        versions = ['baseline', 'v4b']
         analyze_results(versions, args.dataset)
     elif args.compare:
         # 测试并比较所有版本
-        versions = ['baseline', 'v4', 'v4a', 'v4b']
+        versions = ['baseline', 'v4b']
         for version in versions:
             config = get_tracker_config(version)
             if config:
