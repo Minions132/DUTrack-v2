@@ -1,5 +1,9 @@
-# DUTrack GOT-10k 简化优化配置 (v2)
-# 策略：保持Ours框架 + 增强质量过滤
+# DUTrack GOT-10k V8 配置
+# Response Spatial Concentration Enhanced Template Management
+# 核心改进：
+# 1. 使用响应图空间集中度作为额外质量指标
+# 2. 保持V5e的峰值锐度和尺寸匹配
+# 3. 保持质量门控策略
 DATA:
   MAX_SAMPLE_INTERVAL: 200
   MEAN:
@@ -66,15 +70,30 @@ TEST:
   TEMPLATE_FACTOR: 2.0
   TEMPLATE_NUMBER: 4
   TEMPLATE_SIZE: 128
-  # 简化优化v2: 使用原Ours的参数 + 质量过滤
-  FLOW_WINDOW_SIZE: 5
-  FLOW_UPDATE_INTERVAL: 10
-  # 增强质量过滤
-  ITM_THRESHOLD: 0.02 # 提高阈值，只接受高质量融合
-  MIN_UPDATE_INTERVAL: 8 # 保守更新间隔
-  MAX_UPDATE_INTERVAL: 15
+
+  HIGH_CONF_THRESHOLD: 0.7
+  LOW_CONF_THRESHOLD: 0.3
+
+  # V5e: 质量门控参数
+  TEMPLATE_STORE_THRESHOLD: 0.5
+  MID_CONF_THRESHOLD: 0.4
+  MIN_TEMPLATE_INTERVAL: 3
+  SCALE_DIVERSITY_THRESHOLD: 0.25
+
+  # V5e: 尺寸匹配和峰值锐度参数
+  SIZE_MATCH_WEIGHT: 0.15
+  CONF_WEIGHT: 0.85
+  PEAK_SHARPNESS_TOPK: 10
+  SHARPNESS_WEIGHT: 0.3
+
+  # V8新增: 空间集中度参数
+  SPATIAL_CONCENTRATION_RADIUS: 0.15  # 响应图尺寸的15%作为集中半径
+  SPATIAL_CONCENTRATION_TOPK: 10       # 用于计算集中度的top-k数量
+  CONCENTRATION_WEIGHT: 0.15           # 集中度在增强质量中的权重
+
   SAVE_SCORES: true
   PR_IOU_THRESHOLD: 0.5
+
 TRAIN:
   AMP: false
   BACKBONE_MULTIPLIER: 0.1

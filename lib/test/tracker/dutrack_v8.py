@@ -1,17 +1,17 @@
 """
-DUTrack Enhanced V5e - Response Quality-Enhanced Template Management
+DUTrack Enhanced V8 - Response Spatial Concentration Enhanced Template Management
 
-基于V4b的改进：
-1. 使用响应图质量（峰值锐度）作为更丰富的置信度指标
-2. 启用尺寸匹配的模板选择
-3. 保持V4b的质量门控模板存储策略
+基于V5e的改进：
+1. 空间集中度 (Spatial Concentration) - 评估top-K响应是否集中在峰值附近
+2. 保持V5e的峰值锐度和尺寸匹配策略
+3. 保持质量门控模板存储策略
 
 核心idea：
-- 峰值锐度 = max_score / top_k_mean，锐度高表示跟踪更可靠
-- 使用增强的质量指标进行模板存储和选择决策
-- 尺寸匹配帮助选择与当前目标更相关的模板
+- 可靠跟踪的响应图应该有集中的top-K响应分布
+- 如果top-K响应分散在多个位置，可能存在多个候选/干扰
+- 空间集中度作为额外的质量指标，与锐度互补
 
-Author: V5e - Response Quality-Enhanced Template Management
+Author: V8 - Response Spatial Concentration Enhanced Template Management
 """
 
 import math
@@ -60,7 +60,7 @@ class DUTrack(BaseTracker):
         self.z_dict1 = {}
         self.descriptgenRefiner = descriptgenRefiner(params.cfg.MODEL.BACKBONE.BLIP_DIR, params.cfg.MODEL.BACKBONE.BERT_DIR)
         
-        # V5e Parameters (基于V4b)
+        # V5e Parameters (保留)
         self.high_conf_threshold = getattr(self.cfg.TEST, 'HIGH_CONF_THRESHOLD', 0.7)
         self.low_conf_threshold = getattr(self.cfg.TEST, 'LOW_CONF_THRESHOLD', 0.3)
         
@@ -70,13 +70,16 @@ class DUTrack(BaseTracker):
         self.mid_conf_threshold = getattr(self.cfg.TEST, 'MID_CONF_THRESHOLD', 0.4)
         self.scale_diversity_threshold = getattr(self.cfg.TEST, 'SCALE_DIVERSITY_THRESHOLD', 0.25)
         
-        # V5e新增：尺寸匹配权重和峰值锐度参数
+        # V5e: 尺寸匹配和峰值锐度参数
         self.size_match_weight = getattr(self.cfg.TEST, 'SIZE_MATCH_WEIGHT', 0.15)
         self.conf_weight = getattr(self.cfg.TEST, 'CONF_WEIGHT', 0.85)
-        
-        # V5e: 峰值锐度参数 - 用于计算增强的质量分数
         self.peak_sharpness_topk = getattr(self.cfg.TEST, 'PEAK_SHARPNESS_TOPK', 10)
         self.sharpness_weight = getattr(self.cfg.TEST, 'SHARPNESS_WEIGHT', 0.3)
+        
+        # V8新增: 空间集中度参数
+        self.concentration_radius = getattr(self.cfg.TEST, 'SPATIAL_CONCENTRATION_RADIUS', 0.15)
+        self.concentration_topk = getattr(self.cfg.TEST, 'SPATIAL_CONCENTRATION_TOPK', 10)
+        self.concentration_weight = getattr(self.cfg.TEST, 'CONCENTRATION_WEIGHT', 0.15)
 
     def initialize(self, image, info: dict):
         z_patch_arr, resize_factor, z_amask_arr = sample_target(image, info['init_bbox'], self.params.template_factor,
@@ -97,7 +100,6 @@ class DUTrack(BaseTracker):
         self.template_frame_ids = [0]
         self.template_sizes = [(info['init_bbox'][2], info['init_bbox'][3])]
         self.template_confidence = {0: 1.0}
-        # V5e: 存储增强质量分数
         self.template_quality = {0: 1.0}
         
         self.conf_history = deque(maxlen=10)
@@ -135,32 +137,69 @@ class DUTrack(BaseTracker):
         flat_response = response_map.view(-1)
         max_val = flat_response.max().item()
         
-        # 获取top-k值
         k = min(self.peak_sharpness_topk, flat_response.numel())
         topk_vals, _ = torch.topk(flat_response, k)
         topk_mean = topk_vals.mean().item()
         
-        # 计算锐度：max / mean_topk
-        # 值在1附近，>1表示峰值比周围更突出
         sharpness = max_val / (topk_mean + 1e-8)
-        
-        # 归一化到合理范围 [0.5, 1.5] -> [0, 1]
-        # 典型锐度值在1-3之间
         normalized_sharpness = min(1.0, max(0.0, (sharpness - 1.0) / 2.0 + 0.5))
         
         return normalized_sharpness
 
+    def compute_spatial_concentration(self, response_map):
+        """
+        V8新增: 计算top-K响应的空间集中度
+        集中度 = 在峰值半径内的top-k点数量 / k
+        """
+        # 获取响应图
+        if response_map.dim() == 4:
+            response = response_map.squeeze(0).squeeze(0)
+        elif response_map.dim() == 3:
+            response = response_map.squeeze(0)
+        else:
+            response = response_map
+        
+        H, W = response.shape
+        flat_response = response.view(-1)
+        
+        # 获取top-k索引
+        k = min(self.concentration_topk, flat_response.numel())
+        topk_vals, topk_indices = torch.topk(flat_response, k)
+        
+        # 峰值位置
+        peak_idx = topk_indices[0].item()
+        peak_y, peak_x = peak_idx // W, peak_idx % W
+        
+        # 计算半径
+        radius = max(H, W) * self.concentration_radius
+        
+        # 统计在radius内的top-k点数量
+        count_in_radius = 0
+        for idx in topk_indices:
+            y, x = idx.item() // W, idx.item() % W
+            dist = math.sqrt((x - peak_x)**2 + (y - peak_y)**2)
+            if dist <= radius:
+                count_in_radius += 1
+        
+        concentration = count_in_radius / k
+        return concentration
+
     def compute_enhanced_quality(self, confidence, response_map):
         """
-        V5e: 计算增强的质量分数
-        结合原始置信度和峰值锐度
+        V8: 计算增强的质量分数
+        结合原始置信度、峰值锐度和空间集中度
         """
         sharpness = self.compute_peak_sharpness(response_map)
+        concentration = self.compute_spatial_concentration(response_map)
         
-        # 加权组合：主要依赖置信度，锐度作为调整
-        enhanced_quality = (1 - self.sharpness_weight) * confidence + self.sharpness_weight * sharpness
+        # V8: 加权组合三个指标
+        # 基础权重分配：confidence占主导，sharpness和concentration作为调整
+        base_weight = 1 - self.sharpness_weight - self.concentration_weight
+        enhanced_quality = (base_weight * confidence + 
+                           self.sharpness_weight * sharpness + 
+                           self.concentration_weight * concentration)
         
-        return enhanced_quality, sharpness
+        return enhanced_quality, sharpness, concentration
 
     def is_position_stable(self):
         """检查位置是否稳定"""
@@ -223,7 +262,7 @@ class DUTrack(BaseTracker):
 
     def should_store_template(self, enhanced_quality, confidence):
         """
-        V5e: 使用增强质量判断是否存储模板
+        V8: 使用增强质量判断是否存储模板
         """
         # 条件1：最小间隔
         if self.frame_id - self.last_template_frame < self.min_template_interval:
@@ -245,7 +284,7 @@ class DUTrack(BaseTracker):
 
     def select_memory_frames_quality_aware(self):
         """
-        V5e: 基于增强质量和尺寸匹配的模板选择
+        V8: 基于增强质量和尺寸匹配的模板选择
         """
         num_templates = self.cfg.TEST.TEMPLATE_NUMBER
         total_templates = len(self.memory_frames)
@@ -278,7 +317,7 @@ class DUTrack(BaseTracker):
             for idx in range(start_idx, end_idx):
                 frame_id = self.template_frame_ids[idx]
                 
-                # V5e: 使用增强质量分数
+                # V8: 使用增强质量分数
                 quality = self.template_quality.get(frame_id, 0.5)
                 recency_bonus = (idx - start_idx) * 0.0001
                 
@@ -289,7 +328,6 @@ class DUTrack(BaseTracker):
                 if self.size_match_weight > 0 and idx < len(self.template_sizes):
                     cur_w, cur_h = self.state[2], self.state[3]
                     tpl_w, tpl_h = self.template_sizes[idx]
-                    # IoU-style尺寸相似度
                     w_sim = min(cur_w, tpl_w) / (max(cur_w, tpl_w) + 1e-6)
                     h_sim = min(cur_h, tpl_h) / (max(cur_h, tpl_h) + 1e-6)
                     size_sim = w_sim * h_sim
@@ -362,9 +400,9 @@ class DUTrack(BaseTracker):
         pred_score_map = out_dict['score_map']
         response = self.output_window * pred_score_map
         
-        # V5e: 计算原始置信度和增强质量
+        # V8: 计算原始置信度和增强质量（包含空间集中度）
         confidence = pred_score_map.max().item()
-        enhanced_quality, sharpness = self.compute_enhanced_quality(confidence, pred_score_map)
+        enhanced_quality, sharpness, concentration = self.compute_enhanced_quality(confidence, pred_score_map)
         
         self.conf_history.append(confidence)
         
@@ -387,7 +425,7 @@ class DUTrack(BaseTracker):
         self.position_history.append(current_center)
         self.scale_history.append((self.state[2], self.state[3]))
         
-        # V5e: 使用增强质量进行模板存储判断
+        # V8: 使用增强质量进行模板存储判断
         if self.should_store_template(enhanced_quality, confidence):
             z_patch_arr, z_resize_factor, z_amask_arr = sample_target(
                 image, self.state, self.params.template_factor,
@@ -404,7 +442,7 @@ class DUTrack(BaseTracker):
             self.template_frame_ids.append(self.frame_id)
             self.template_sizes.append((self.state[2], self.state[3]))
             self.template_confidence[self.frame_id] = confidence
-            # V5e: 存储增强质量
+            # V8: 存储增强质量
             self.template_quality[self.frame_id] = enhanced_quality
             self.frame_to_template_idx[self.frame_id] = template_idx
             self.last_template_frame = self.frame_id

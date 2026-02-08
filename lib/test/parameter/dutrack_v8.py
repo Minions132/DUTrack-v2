@@ -20,7 +20,7 @@ def parameters(yaml_name: str, run_id=None):
     params.search_size = cfg.TEST.SEARCH_SIZE
 
     # Network checkpoint path - 使用baseline的checkpoint
-    # V4b改进的是推理逻辑，不需要重新训练
+    # V8改进的是推理逻辑，不需要重新训练
     baseline_config = 'dutrack_256_got_baseline'
     if run_id is None:
         params.checkpoint = os.path.join(save_dir, "checkpoints/train/dutrack/%s/DUTrack_ep%04d.pth.tar" %

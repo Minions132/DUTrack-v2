@@ -149,6 +149,22 @@ cfg.TEST.SHARPNESS_WEIGHT = 0.3            # Sharpness weight in enhanced qualit
 cfg.TEST.DIVERSITY_WEIGHT = 0.2            # Diversity weight in final template selection score
 cfg.TEST.QUALITY_WEIGHT = 0.8              # Quality weight in final template selection score
 
+# V7: Temporal consistency parameters for enhanced template selection
+cfg.TEST.CONFIDENCE_EMA_ALPHA = 0.3        # EMA smoothing coefficient (smaller = smoother)
+cfg.TEST.CONSISTENCY_WEIGHT = 0.1          # Temporal consistency weight in template selection
+
+# V8: Spatial concentration parameters for quality assessment
+cfg.TEST.SPATIAL_CONCENTRATION_RADIUS = 0.15  # Radius as fraction of response map size
+cfg.TEST.SPATIAL_CONCENTRATION_TOPK = 10      # Top-k for concentration calculation
+cfg.TEST.CONCENTRATION_WEIGHT = 0.15          # Concentration weight in enhanced quality
+
+# V12: Peak Centrality parameters
+cfg.TEST.PEAK_CENTRALITY_WEIGHT = 0.15        # Peak centrality weight in enhanced quality
+
+# V9: Recency-guaranteed template selection and pool pruning
+cfg.TEST.RECENCY_WEIGHT = 0.05                # Recency weight in template selection (within segment)
+cfg.TEST.MAX_STORED_TEMPLATES = 30             # Maximum stored templates before pruning
+
 
 def _edict2dict(dest_dict, src_edict):
     if isinstance(dest_dict, dict) and isinstance(src_edict, dict):
